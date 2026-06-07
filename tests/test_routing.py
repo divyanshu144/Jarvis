@@ -172,7 +172,7 @@ class TestRouting:
         assert result.tiers_attempted == [1]
         assert result.escalation_reason is None
         assert "Chrome" in result.response
-        mock_dispatch.assert_called_once_with("app_control", {"action": "open", "app_name": "Chrome"})
+        mock_dispatch.assert_called_once_with("app_control", {"action": "open", "app_name": "Chrome"}, request_id=None)
 
     # Test 2: Vision keyword → routes directly to Tier 3
     @patch("jarvis.core.router.dispatch", return_value="")

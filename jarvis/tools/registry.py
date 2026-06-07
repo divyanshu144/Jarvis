@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import Any, Callable
 
 from jarvis.core.tool_safety import check_tool_safety
+from jarvis.core.tracing import record_safety_block, record_tool_run, summarize_tool_result
 from jarvis.tools import (
     apple_music,
     app_control,
@@ -74,17 +75,70 @@ _EXECUTORS: dict[str, Callable[..., str]] = {
 }
 
 
-def dispatch(tool_name: str, tool_input: dict[str, Any]) -> str:
+def dispatch(tool_name: str, tool_input: dict[str, Any], request_id: str | None = None) -> str:
     """Execute a tool by name with the given input dict. Always returns a string."""
+    import time
+
+    started = time.monotonic()
     executor = _EXECUTORS.get(tool_name)
     if executor is None:
-        return f"Error: unknown tool '{tool_name}'."
+        result = f"Error: unknown tool '{tool_name}'."
+        if request_id:
+            record_tool_run(
+                request_id,
+                tool_name,
+                tool_input,
+                status="error",
+                result_summary=result,
+                error=result,
+                latency_ms=(time.monotonic() - started) * 1000,
+            )
+        return result
+
     safety = check_tool_safety(tool_name, tool_input)
     if not safety.allowed:
-        return f"Safety blocked {tool_name}: {safety.reason}"
+        result = f"Safety blocked {tool_name}: {safety.reason}"
+        if request_id:
+            record_safety_block(request_id, tool_name, tool_input, safety.reason)
+        return result
+
     try:
-        return executor(**tool_input)
+        result = executor(**tool_input)
+        status = "error" if str(result).startswith("Error") else "ok"
+        if request_id:
+            record_tool_run(
+                request_id,
+                tool_name,
+                tool_input,
+                status=status,
+                result_summary=summarize_tool_result(tool_name, result),
+                error=str(result) if status == "error" else "",
+                latency_ms=(time.monotonic() - started) * 1000,
+            )
+        return result
     except TypeError as e:
-        return f"Error calling {tool_name}: bad arguments — {e}"
+        result = f"Error calling {tool_name}: bad arguments — {e}"
+        if request_id:
+            record_tool_run(
+                request_id,
+                tool_name,
+                tool_input,
+                status="error",
+                result_summary=result,
+                error=str(e),
+                latency_ms=(time.monotonic() - started) * 1000,
+            )
+        return result
     except Exception as e:
-        return f"Error in {tool_name}: {e}"
+        result = f"Error in {tool_name}: {e}"
+        if request_id:
+            record_tool_run(
+                request_id,
+                tool_name,
+                tool_input,
+                status="error",
+                result_summary=result,
+                error=str(e),
+                latency_ms=(time.monotonic() - started) * 1000,
+            )
+        return result

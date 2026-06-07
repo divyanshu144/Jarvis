@@ -24,6 +24,8 @@ class RoutingResult:
     escalation_reason: Optional[str]        # None if Tier 1 succeeded
     wall_time_ms: float                     # total time from route() call to return
     query: str
+    chosen_model: str = ""
+    tools_executed: list[dict[str, str]] = field(default_factory=list)
 
 
 class MetricsLogger:

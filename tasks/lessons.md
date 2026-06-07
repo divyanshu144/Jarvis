@@ -71,4 +71,10 @@ Pattern: hook-scope-and-sql-safety
 Fix: Scope Bash safety hooks to the active repository path and test dangerous commands as synthetic hook payloads, including commands embedded inside wrappers such as `psql prod -c "TRUNCATE ..."`.
 Avoid: Do not leave hooks scoped to a previous project, and do not only match `TRUNCATE` when it appears as the first shell command.
 See: .claude/hooks/pre-tool-use.sh
+## 2026-06-07 Trace Without Behavior Drift
+
+Pattern: best-effort-agent-tracing
+Fix: Put trace persistence behind helper functions that catch their own SQLite/redaction failures, pass `request_id` as an optional keyword, and keep tool return strings unchanged.
+Avoid: Do not refactor the router or safety policy while adding observability; tracing should observe the run, not steer it.
+See: jarvis/core/tracing.py
 

@@ -52,4 +52,15 @@
 - [x] Update `CLAUDE.md` session lifecycle and definition of done.
 - [x] Add reusable lesson template and tighten promote-lesson counting guidance.
 - [x] Run `make check` and hook smoke tests.
+## Reliability Phase 1 - Observability Tracing
+
+- [x] Explore agent, router, registry, safety, memory, config, logging, and tests before editing.
+- [x] Add best-effort SQLite tracing module.
+- [x] Add `agent_runs` and `tool_runs` tables.
+- [x] Generate one request id per `Agent.chat()` call.
+- [x] Pass request id through router and tool dispatch paths.
+- [x] Record tool runs and safety blocks without changing tool outputs.
+- [x] Redact secret-like fields and truncate long trace values.
+- [x] Add tracing tests and preserve routing/tool tests.
+- [x] Run `make check`.
 

@@ -15,6 +15,7 @@ from jarvis.core.logger import get_logger
 from jarvis.core.memory import Memory
 from jarvis.core.metrics import MetricsLogger
 from jarvis.core.router import Router
+from jarvis.core.tracing import finish_agent_run, new_request_id, start_agent_run
 
 log = get_logger(__name__)
 
@@ -165,45 +166,72 @@ class Agent:
 
     def chat(self, user_text: str, include_screenshot: bool = False) -> str:
         """Route query through the tier cascade, update memory, log metrics."""
+        request_id = new_request_id()
+        start_agent_run(request_id, user_text)
 
-        # Capture screenshot if requested or if vision keywords present
-        if include_screenshot or any(p in user_text.lower() for p in cfg.tier3_patterns):
-            _capture_screenshot()
+        try:
+            # Capture screenshot if requested or if vision keywords present
+            if include_screenshot or any(p in user_text.lower() for p in cfg.tier3_patterns):
+                _capture_screenshot()
 
-        # Detect user correction — store it and continue
-        if self._learner.is_correction(user_text) and self._last_response:
-            self._learner.record_correction(
-                user_query=self._last_user_text,
-                bad_response=self._last_response,
-                correction=user_text,
+            # Detect user correction — store it and continue
+            if self._learner.is_correction(user_text) and self._last_response:
+                self._learner.record_correction(
+                    user_query=self._last_user_text,
+                    bad_response=self._last_response,
+                    correction=user_text,
+                )
+
+            # Working memory: last 10 messages (5 user+assistant pairs)
+            history = self._memory.working_messages(n=10)
+
+            # Episodic recall + self-learning corrections in system prompt
+            past_context    = self._memory.recall_context(user_text)
+            corrections_ctx = self._learner.corrections_context()
+            system = self._system_prompt(past_context, corrections_ctx)
+
+            result = self._router.route(user_text, system, history=history, request_id=request_id)
+
+            log.info(
+                f"[Routing] tier={result.tier_used} "
+                f"tried={result.tiers_attempted} "
+                f"reason={result.escalation_reason} "
+                f"time={result.wall_time_ms:.0f}ms"
             )
 
-        # Working memory: last 10 messages (5 user+assistant pairs)
-        history = self._memory.working_messages(n=10)
+            self._memory.short.add("user", user_text)
+            self._memory.short.add("assistant", result.response)
+            self._memory.add_turn(user_text, result.response)
+            self._metrics.log(result)
 
-        # Episodic recall + self-learning corrections in system prompt
-        past_context    = self._memory.recall_context(user_text)
-        corrections_ctx = self._learner.corrections_context()
-        system = self._system_prompt(past_context, corrections_ctx)
+            self._last_user_text = user_text
+            self._last_response  = result.response
 
-        result = self._router.route(user_text, system, history=history)
+            safety_blocks = [
+                tool for tool in result.tools_executed
+                if str(tool.get("result", "")).startswith("Safety blocked")
+            ]
+            finish_agent_run(
+                request_id,
+                route="tier_cascade",
+                intent=result.escalation_reason or "default",
+                chosen_tier=result.tier_used,
+                chosen_model=result.chosen_model,
+                tools_executed=result.tools_executed,
+                safety_blocks=safety_blocks,
+                fallback_path=" -> ".join(str(tier) for tier in result.tiers_attempted),
+                final_answer=result.response,
+                latency_ms=result.wall_time_ms,
+            )
 
-        log.info(
-            f"[Routing] tier={result.tier_used} "
-            f"tried={result.tiers_attempted} "
-            f"reason={result.escalation_reason} "
-            f"time={result.wall_time_ms:.0f}ms"
-        )
-
-        self._memory.short.add("user", user_text)
-        self._memory.short.add("assistant", result.response)
-        self._memory.add_turn(user_text, result.response)
-        self._metrics.log(result)
-
-        self._last_user_text = user_text
-        self._last_response  = result.response
-
-        return result.response
+            return result.response
+        except Exception as e:
+            finish_agent_run(
+                request_id,
+                route="tier_cascade",
+                error=str(e),
+            )
+            raise
 
 
 def _capture_screenshot() -> None:

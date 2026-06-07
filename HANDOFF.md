@@ -216,4 +216,69 @@ Limitations / Follow-up:
 - Commit before handoff amend: `5055863 Initial JARVIS assistant workflow and FDE tracker`.
 - Push attempt command: `git push`.
 - Push result: failed because no push destination/remote is configured. Configure a remote with `git remote add <name> <url>` and push with `git push <name> master` or set upstream.
+## Latest Reliability Phase 1 Observability Note
+
+Objective:
+
+- Implement Phase 1 observability/tracing only. No cost monitoring, evals, hallucination checks, context manager, harness refactor, routing behavior changes, safety policy changes, or tool behavior changes were added.
+
+Architecture summary from exploration:
+
+- JARVIS runtime starts in `jarvis.py`; user text flows through `Agent.chat()`, then `Router.route()`, then memory/metrics persistence and caller-side HUD/TTS.
+- Routing lives in `jarvis/core/router.py` with hard routes, learned tier suggestions, Tier 1 Ollama, Tier 2 Groq, and Tier 3 Anthropic/Groq fallback.
+- Tools are validated in router tier loops and executed through `jarvis/tools/registry.py::dispatch()`.
+- Safety policy lives in `jarvis/core/tool_safety.py` and runs inside `dispatch()` before executor invocation.
+- SQLite persistence already exists in memory, metrics, learning, and FDE modules using `cfg.db_path`.
+- Tests are pytest-based with mocked provider SDKs and direct tool smoke tests in `tests/test_routing.py`.
+
+Files changed:
+
+- `jarvis/core/tracing.py`
+- `jarvis/core/agent.py`
+- `jarvis/core/router.py`
+- `jarvis/core/metrics.py`
+- `jarvis/tools/registry.py`
+- `tests/test_tracing.py`
+- `tests/test_routing.py`
+- `tasks/todo.md`
+- `tasks/lessons.md`
+- `HANDOFF.md`
+
+Database tables added:
+
+- `agent_runs`: request-level trace row with request id, sanitized user message, route/intent/tier/model metadata, tool/safety JSON fields, final answer/error, latency, and created timestamp.
+- `tool_runs`: per-tool trace row with request id, tool name, sanitized tool args JSON, status, result summary/error, latency, and created timestamp.
+
+Wiring completed:
+
+- `Agent.chat()` creates one `request_id`, starts an `agent_runs` row, passes the id to `Router.route()`, and finishes the row on success or error.
+- `Router.route()` accepts optional `request_id` and forwards it to tier tool dispatch calls.
+- `RoutingResult` now carries optional `chosen_model` and `tools_executed` metadata for tracing while preserving existing positional fields.
+- `registry.dispatch()` accepts optional `request_id` and records tool runs/safety blocks only when a request id is present, preserving direct tool call behavior.
+
+Trace safety behavior:
+
+- Tracing is best-effort; helper functions catch SQLite/redaction failures and log debug messages instead of crashing callers.
+- Secret-like keys such as API key, secret, token, password, authorization, cookie, and client/refresh/access token fields are redacted.
+- Secret-like values and bearer tokens are redacted.
+- Long user messages, tool args, tool outputs, and final answers are truncated before storage.
+
+Not wired yet:
+
+- `tools_requested` is initialized but not populated from raw provider tool-call proposals beyond executed tool metadata.
+- Tier 3 model metadata is approximate when Anthropic falls back to Groq after an Anthropic exception.
+- No HUD or CLI trace viewer exists yet.
+- No cost, eval, hallucination, context compression, or harness refactor work was done.
+
+Verification:
+
+- `python3 -m py_compile jarvis/core/tracing.py jarvis/core/agent.py jarvis/core/router.py jarvis/core/metrics.py jarvis/tools/registry.py tests/test_tracing.py tests/test_routing.py`: passed.
+- `python3 -m pytest tests/test_tracing.py tests/test_routing.py -v`: passed with 38 tests.
+- `make check`: passed; compileall, py_compile, and pytest completed with 38 tests passing.
+
+Risks / follow-up:
+
+- Trace tables can grow over time; add retention or pruning before heavy long-running use.
+- Trace rows intentionally store sanitized snippets, not full private data. Do not use them as an audit source for full email/calendar/screen content.
+- Next recommended phase is cost monitoring, using this request/tool trace foundation.
 

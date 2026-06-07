@@ -179,6 +179,7 @@ class Router:
         query: str,
         system_prompt: str,
         history: list[dict] | None = None,
+        request_id: str | None = None,
     ) -> RoutingResult:
         """Route a query through the tier cascade and return a RoutingResult."""
         start = time.monotonic()
@@ -191,33 +192,33 @@ class Router:
         # Vision / screen queries → Tier 3 directly
         if any(p in lower for p in cfg.tier3_patterns):
             log.info("Router: vision keyword → Tier 3 directly")
-            resp = self._tier3(clean, system_prompt, "vision_query", [], [], history)
-            return RoutingResult(resp, 3, [3], "vision_query", _elapsed_ms(start), clean)
+            resp = self._tier3(clean, system_prompt, "vision_query", [], [], history, request_id=request_id)
+            return RoutingResult(resp, 3, [3], "vision_query", _elapsed_ms(start), clean, chosen_model=cfg.claude_model if cfg.anthropic_key else cfg.groq_model)
 
         # "complex:" prefix → Tier 3 directly
         if lower.startswith("complex:"):
             actual = clean[8:].strip()
             log.info("Router: 'complex:' prefix → Tier 3 directly")
-            resp = self._tier3(actual, system_prompt, "forced_complex", [], [], history)
-            return RoutingResult(resp, 3, [3], "forced_complex", _elapsed_ms(start), actual)
+            resp = self._tier3(actual, system_prompt, "forced_complex", [], [], history, request_id=request_id)
+            return RoutingResult(resp, 3, [3], "forced_complex", _elapsed_ms(start), actual, chosen_model=cfg.claude_model if cfg.anthropic_key else cfg.groq_model)
 
         # "quick:" prefix → Tier 1 only, no escalation
         if lower.startswith("quick:"):
             actual = clean[6:].strip()
             log.info("Router: 'quick:' prefix → Tier 1, no escalation")
-            attempt = self._tier1(actual, system_prompt, history)
+            attempt = self._tier1(actual, system_prompt, history, request_id=request_id)
             resp = attempt.response or f"[Tier 1 unavailable: {attempt.escalation_reason}]"
-            return RoutingResult(resp, 1, [1], attempt.escalation_reason, _elapsed_ms(start), actual)
+            return RoutingResult(resp, 1, [1], attempt.escalation_reason, _elapsed_ms(start), actual, chosen_model=cfg.tier1_model, tools_executed=attempt.executed_tools)
 
         # ── Queries where Tier 1 is known-bad → skip to Tier 2 ───────────────
 
         if _TIER2_DIRECT.search(lower):
             log.info("Router: direct Tier 2 (action query)")
-            t2 = self._tier2(clean, system_prompt, "tier2_direct", [], history)
+            t2 = self._tier2(clean, system_prompt, "tier2_direct", [], history, request_id=request_id)
             if t2.success:
-                return RoutingResult(t2.response, 2, [2], "tier2_direct", _elapsed_ms(start), clean)
-            resp = self._tier3(clean, system_prompt, "tier2_direct", [2], t2.executed_tools, history)
-            return RoutingResult(resp, 3, [2, 3], "tier2_direct", _elapsed_ms(start), clean)
+                return RoutingResult(t2.response, 2, [2], "tier2_direct", _elapsed_ms(start), clean, chosen_model=cfg.groq_model, tools_executed=t2.executed_tools)
+            resp = self._tier3(clean, system_prompt, "tier2_direct", [2], t2.executed_tools, history, request_id=request_id)
+            return RoutingResult(resp, 3, [2, 3], "tier2_direct", _elapsed_ms(start), clean, chosen_model=cfg.claude_model if cfg.anthropic_key else cfg.groq_model, tools_executed=t2.executed_tools)
 
         # ── Learning-based tier suggestion ────────────────────────────────────
 
@@ -227,37 +228,37 @@ class Router:
 
         if suggested == 2:
             log.info("Router: learning → skip to Tier 2")
-            t2 = self._tier2(clean, system_prompt, "learned_routing", [], history)
+            t2 = self._tier2(clean, system_prompt, "learned_routing", [], history, request_id=request_id)
             if t2.success:
                 self._learning().record_routing(clean, 2, True)
-                return RoutingResult(t2.response, 2, [2], "learned_routing", _elapsed_ms(start), clean)
+                return RoutingResult(t2.response, 2, [2], "learned_routing", _elapsed_ms(start), clean, chosen_model=cfg.groq_model, tools_executed=t2.executed_tools)
 
         log.info("Router: trying Tier 1 (Ollama)")
-        t1 = self._tier1(clean, system_prompt, history)
+        t1 = self._tier1(clean, system_prompt, history, request_id=request_id)
         if t1.success:
             log.info(f"Router: Tier 1 succeeded in {_elapsed_ms(start):.0f}ms")
             self._learning().record_routing(clean, 1, True)
-            return RoutingResult(t1.response, 1, [1], None, _elapsed_ms(start), clean)
+            return RoutingResult(t1.response, 1, [1], None, _elapsed_ms(start), clean, chosen_model=cfg.tier1_model, tools_executed=t1.executed_tools)
 
         self._learning().record_routing(clean, 1, False)
         log.info(f"Router: Tier 1 failed ({t1.escalation_reason}) → Tier 2")
-        t2 = self._tier2(clean, system_prompt, t1.escalation_reason or "unknown", t1.executed_tools, history)
+        t2 = self._tier2(clean, system_prompt, t1.escalation_reason or "unknown", t1.executed_tools, history, request_id=request_id)
         if t2.success:
             log.info(f"Router: Tier 2 succeeded in {_elapsed_ms(start):.0f}ms")
             self._learning().record_routing(clean, 2, True)
-            return RoutingResult(t2.response, 2, [1, 2], t1.escalation_reason, _elapsed_ms(start), clean)
+            return RoutingResult(t2.response, 2, [1, 2], t1.escalation_reason, _elapsed_ms(start), clean, chosen_model=cfg.groq_model, tools_executed=t1.executed_tools + t2.executed_tools)
 
         self._learning().record_routing(clean, 2, False)
         log.info(f"Router: Tier 2 failed ({t2.escalation_reason}) → Tier 3")
         prior = t1.executed_tools + t2.executed_tools
         reason = t2.escalation_reason or t1.escalation_reason or "tier2_failed"
-        resp = self._tier3(clean, system_prompt, reason, [1, 2], prior, history)
+        resp = self._tier3(clean, system_prompt, reason, [1, 2], prior, history, request_id=request_id)
         self._learning().record_routing(clean, 3, True)
-        return RoutingResult(resp, 3, [1, 2, 3], reason, _elapsed_ms(start), clean)
+        return RoutingResult(resp, 3, [1, 2, 3], reason, _elapsed_ms(start), clean, chosen_model=cfg.claude_model if cfg.anthropic_key else cfg.groq_model, tools_executed=prior)
 
     # ── Tier 1 — Ollama ───────────────────────────────────────────────────────
 
-    def _tier1(self, query: str, system_prompt: str, history: list[dict] | None = None) -> _Attempt:
+    def _tier1(self, query: str, system_prompt: str, history: list[dict] | None = None, request_id: str | None = None) -> _Attempt:
         try:
             from openai import OpenAI, APITimeoutError, APIConnectionError
 
@@ -324,7 +325,7 @@ class Router:
 
                     if self._on_tool_call:
                         self._on_tool_call(name, params)
-                    result = dispatch(name, params)
+                    result = dispatch(name, params, request_id=request_id)
                     executed.append({"tool": name, "result": result})
                     log.info(f"Tier 1 executed: {name}")
 
@@ -356,6 +357,7 @@ class Router:
         escalation_reason: str,
         prior_tools: list[dict],
         history: list[dict] | None = None,
+        request_id: str | None = None,
     ) -> _Attempt:
         try:
             from groq import Groq
@@ -422,7 +424,7 @@ class Router:
 
                     if self._on_tool_call:
                         self._on_tool_call(name, params)
-                    result = dispatch(name, params)
+                    result = dispatch(name, params, request_id=request_id)
                     executed.append({"tool": name, "result": result})
                     log.info(f"Tier 2 executed: {name}")
 
@@ -448,6 +450,7 @@ class Router:
         tiers_tried: list[int],
         prior_tools: list[dict],
         history: list[dict] | None = None,
+        request_id: str | None = None,
     ) -> str:
         context = f"\n\n[Escalated from Tier(s) {tiers_tried}. Reason: {reason}]"
         if prior_tools:
@@ -456,7 +459,7 @@ class Router:
         # Try Anthropic first; fall back to Groq if no credits or unavailable
         if cfg.anthropic_key:
             try:
-                return self._tier3_anthropic(query, system_prompt + context, reason, history or [])
+                return self._tier3_anthropic(query, system_prompt + context, reason, history or [], request_id=request_id)
             except Exception as e:
                 err_str = str(e).lower()
                 if "credit" in err_str or "billing" in err_str or "balance" in err_str:
@@ -464,9 +467,9 @@ class Router:
                 else:
                     log.warning(f"Tier 3: Anthropic error ({e}) — falling back to Groq")
 
-        return self._tier3_groq(query, system_prompt + context, history or [])
+        return self._tier3_groq(query, system_prompt + context, history or [], request_id=request_id)
 
-    def _tier3_anthropic(self, query: str, full_system: str, reason: str, history: list[dict]) -> str:
+    def _tier3_anthropic(self, query: str, full_system: str, reason: str, history: list[dict], request_id: str | None = None) -> str:
         import base64
         import anthropic
         from jarvis.core.agent import _SHOT_PATH
@@ -528,7 +531,7 @@ class Router:
                     log_failure(self._db, tu.name, tu.input, errors, tier=3)
                 if self._on_tool_call:
                     self._on_tool_call(tu.name, tu.input)
-                result = dispatch(tu.name, tu.input)
+                result = dispatch(tu.name, tu.input, request_id=request_id)
                 log.info(f"Tier 3 (Anthropic) executed: {tu.name}")
                 return tu.id, result
 
@@ -546,7 +549,7 @@ class Router:
 
         return turn_text
 
-    def _tier3_groq(self, query: str, full_system: str, history: list[dict] | None = None) -> str:
+    def _tier3_groq(self, query: str, full_system: str, history: list[dict] | None = None, request_id: str | None = None) -> str:
         """Groq fallback for Tier 3 when Anthropic is unavailable."""
         import groq as groq_sdk
         client = groq_sdk.Groq(api_key=cfg.groq_key)
@@ -589,7 +592,7 @@ class Router:
                     log_failure(self._db, name, params, errors, tier=3, raw_response=tc.function.arguments)
                 if self._on_tool_call:
                     self._on_tool_call(name, params)
-                result = dispatch(name, params)
+                result = dispatch(name, params, request_id=request_id)
                 executed.append({"tool": name, "result": result})
                 log.info(f"Tier 3 (Groq) executed: {name}")
                 tool_results.append({
