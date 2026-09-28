@@ -10,6 +10,11 @@ from jarvis.core.logger import get_logger
 
 log = get_logger(__name__)
 
+
+def _as_escape(value: str) -> str:
+    """Escape text for an AppleScript string literal (backslashes first, then quotes)."""
+    return str(value).replace("\\", "\\\\").replace('"', '\\"')
+
 DEFINITION = {
     "name": "system_control",
     "description": (
@@ -168,8 +173,8 @@ def execute(
         if action == "send_imessage":
             if not contact or not message:
                 return "Error: contact and message are required."
-            safe_msg = message.replace('"', '\\"')
-            safe_contact = contact.replace('"', '\\"')
+            safe_msg = _as_escape(message)
+            safe_contact = _as_escape(contact)
             script = f"""
             tell application "Messages"
                 set targetService to 1st service whose service type = iMessage
@@ -186,7 +191,7 @@ def execute(
         if action == "lookup_contact":
             if not contact:
                 return "Error: contact name required."
-            safe = contact.replace('"', '\\"')
+            safe = _as_escape(contact)
             script = f"""
             tell application "Contacts"
                 set results to ""
@@ -238,9 +243,9 @@ def execute(
         # ── Reminders ─────────────────────────────────────────────────────────
         if action == "add_reminder":
             name = title or message or "Reminder"
-            safe_name = name.replace('"', '\\"')
+            safe_name = _as_escape(name)
             if due_date:
-                safe_due = due_date.replace('"', '\\"')
+                safe_due = _as_escape(due_date)
                 script = f"""
                 tell application "Reminders"
                     set r to make new reminder with properties {{name:"{safe_name}"}}
@@ -261,8 +266,8 @@ def execute(
         if action == "add_note":
             note_title = title or "JARVIS Note"
             note_body  = message or ""
-            safe_title = note_title.replace('"', '\\"')
-            safe_body  = note_body.replace('"', '\\"')
+            safe_title = _as_escape(note_title)
+            safe_body  = _as_escape(note_body)
             script = f"""
             tell application "Notes"
                 tell account "iCloud"
@@ -291,7 +296,7 @@ def execute(
         if action == "facetime_call":
             if not contact:
                 return "Error: contact required."
-            safe = contact.replace('"', '\\"')
+            safe = _as_escape(contact)
             script = f"""
             tell application "FaceTime"
                 activate

@@ -11,7 +11,7 @@ import threading
 import time
 from typing import Callable
 
-from jarvis.core.logger import get_logger
+from jarvis.core.logger import content_preview, get_logger
 
 log = get_logger(__name__)
 
@@ -57,7 +57,7 @@ class ProactiveMonitor:
         """Speak only if JARVIS isn't already handling a voice cycle."""
         if self._is_busy():
             return
-        log.info(f"[Proactive] {text}")
+        log.info(f"[Proactive] {content_preview(text)}")
         self._speak(text)
 
     def _check_calendar(self) -> None:

@@ -7,6 +7,7 @@ import subprocess
 import time
 from pathlib import Path
 
+from jarvis.core import privacy
 from jarvis.core.logger import get_logger
 
 log = get_logger(__name__)
@@ -41,14 +42,15 @@ def capture(region: str = "full") -> tuple[str, str]:
     flag = "-w" if region == "active_window" else ""
     cmd = f"screencapture -x {flag} {_SHOT_PATH}".split()
     subprocess.run(cmd, check=True)
+    privacy.notify_capture()
     data = base64.b64encode(_SHOT_PATH.read_bytes()).decode()
     return str(_SHOT_PATH), data
 
 
 def execute(region: str = "full") -> str:
     try:
-        path, _ = capture(region)
-        return f"Screenshot saved to {path}. (Vision context will be included automatically.)"
+        capture(region)
+        return "Screenshot captured for this request; it is deleted when the request finishes."
     except Exception as e:
         log.error(f"screenshot failed: {e}")
         return f"Error: {e}"

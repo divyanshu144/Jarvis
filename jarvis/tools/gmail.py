@@ -19,22 +19,22 @@ DEFINITION = {
     "description": (
         "Read, search, send, and reply to emails in Gmail. "
         "Use for: checking inbox, reading emails, sending messages, replying to threads, "
-        "searching for emails, marking as read. "
-        "Actions: list_inbox, read_email, search, send, reply, mark_read, get_unread_count."
+        "searching for emails. "
+        "Actions: list_inbox, read_email, search, send, reply, get_unread_count."
     ),
     "input_schema": {
         "type": "object",
         "properties": {
             "action": {
                 "type": "string",
-                "enum": ["list_inbox", "read_email", "search", "send", "reply", "mark_read", "get_unread_count"],
+                "enum": ["list_inbox", "read_email", "search", "send", "reply", "get_unread_count"],
                 "description": "Action to perform.",
             },
             "query": {
                 "type": "string",
                 "description": "Gmail search query (for search) or inbox filter (e.g. 'is:unread', 'from:boss@company.com').",
             },
-            "email_id": {"type": "string", "description": "Email message ID for read/reply/mark_read."},
+            "email_id": {"type": "string", "description": "Email message ID for read/reply."},
             "to": {"type": "string", "description": "Recipient email address for send."},
             "subject": {"type": "string", "description": "Email subject for send."},
             "body": {"type": "string", "description": "Email body text for send or reply."},
@@ -141,15 +141,6 @@ def execute(
                 return "Error: email_id required."
             msg = service.users().messages().get(userId=user, id=email_id, format="full").execute()
             return _format_message(msg, full=True)
-
-        if action == "mark_read":
-            if not email_id:
-                return "Error: email_id required."
-            service.users().messages().modify(
-                userId=user, id=email_id,
-                body={"removeLabelIds": ["UNREAD"]}
-            ).execute()
-            return f"Email {email_id} marked as read."
 
         if action == "send":
             if not to or not body:

@@ -105,7 +105,7 @@ class Config:
 
     @property
     def groq_model(self) -> str:
-        return _get(self._raw, "groq", "model", default="meta-llama/llama-4-scout-17b-16e-instruct")
+        return _get(self._raw, "groq", "model", default="openai/gpt-oss-120b")
 
     @property
     def groq_max_tokens(self) -> int:
@@ -139,7 +139,7 @@ class Config:
 
     @property
     def claude_model(self) -> str:
-        return _get(self._raw, "claude", "model", default="claude-sonnet-4-20250514")
+        return _get(self._raw, "claude", "model", default="claude-sonnet-5")
 
     @property
     def claude_max_tokens(self) -> int:
@@ -227,6 +227,39 @@ class Config:
     @property
     def top_k_similar(self) -> int:
         return _get(self._raw, "memory", "top_k_similar", default=3)
+
+    @property
+    def privacy_local_only(self) -> bool:
+        """Keep sensitive tool output (email, calendar, screen, files, clipboard) off cloud tiers and cloud TTS."""
+        env = os.getenv("JARVIS_LOCAL_ONLY", "").strip().lower()
+        if env:
+            return env in {"1", "true", "yes", "on"}
+        return bool(_get(self._raw, "privacy", "local_only", default=False))
+
+    @property
+    def wake_word_enabled(self) -> bool:
+        """Always-on wake-word microphone. False = hotkey/typing only."""
+        return bool(_get(self._raw, "voice", "wake_word", default=True))
+
+    @property
+    def log_retention_days(self) -> int:
+        """Daily log files to keep in logs/ (minimum 1)."""
+        return int(_get(self._raw, "logging", "retention_days", default=14) or 14)
+
+    @property
+    def log_conversation_content(self) -> bool:
+        """Write transcripts/replies to logs. Off by default for privacy."""
+        return bool(_get(self._raw, "logging", "conversation_content", default=False))
+
+    @property
+    def memory_retention_days(self) -> int:
+        """Days of conversation history to keep; 0 disables automatic deletion."""
+        return int(_get(self._raw, "memory", "retention_days", default=90) or 0)
+
+    @property
+    def trace_retention_days(self) -> int:
+        """Days of agent/tool trace rows to keep; 0 disables automatic pruning."""
+        return int(_get(self._raw, "tracing", "retention_days", default=30) or 0)
 
     @property
     def db_path(self) -> Path:

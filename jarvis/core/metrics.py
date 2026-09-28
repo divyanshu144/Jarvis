@@ -11,6 +11,7 @@ from dataclasses import dataclass, field
 from typing import Optional
 
 from jarvis.core.logger import get_logger
+from jarvis.core.tracing import redact_text
 
 log = get_logger(__name__)
 
@@ -26,6 +27,9 @@ class RoutingResult:
     query: str
     chosen_model: str = ""
     tools_executed: list[dict[str, str]] = field(default_factory=list)
+    input_tokens: int | None = None
+    output_tokens: int | None = None
+    usage_source: str = "missing_usage"
 
 
 class MetricsLogger:
@@ -59,7 +63,7 @@ class MetricsLogger:
                 "INSERT INTO routing_metrics VALUES (NULL,?,?,?,?,?,?,?)",
                 (
                     time.time(),
-                    result.query,
+                    redact_text(result.query or "")[:400],
                     result.tier_used,
                     json.dumps(result.tiers_attempted),
                     result.escalation_reason,

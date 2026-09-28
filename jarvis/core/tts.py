@@ -218,6 +218,9 @@ def speak(text: str) -> None:
             .replace("#", "")
     )
     provider = cfg.tts_provider
+    if cfg.privacy_local_only and provider in {"auto", "elevenlabs"}:
+        # Replies can quote email/calendar content; keep speech synthesis on the Mac.
+        provider = "auto_local"
     if provider in {"auto", "elevenlabs"} and _EL_AVAILABLE and cfg.elevenlabs_key:
         try:
             log.info("TTS via ElevenLabs (streaming)")
@@ -228,7 +231,7 @@ def speak(text: str) -> None:
             if provider == "elevenlabs":
                 raise
 
-    if provider in {"auto", "local", "kokoro", "piper"}:
+    if provider in {"auto", "auto_local", "local", "kokoro", "piper"}:
         try:
             local_provider = provider if provider in {"kokoro", "piper"} else None
             _speak_local(clean, local_provider)

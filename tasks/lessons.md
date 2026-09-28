@@ -77,4 +77,60 @@ Pattern: best-effort-agent-tracing
 Fix: Put trace persistence behind helper functions that catch their own SQLite/redaction failures, pass `request_id` as an optional keyword, and keep tool return strings unchanged.
 Avoid: Do not refactor the router or safety policy while adding observability; tracing should observe the run, not steer it.
 See: jarvis/core/tracing.py
+## 2026-06-07 Trace Privacy Defaults
 
+Pattern: trace-privacy-defaults
+Fix: Treat Gmail, calendar, screen, browser, file, clipboard, shell, code, system, and file-search outputs as sensitive in traces, storing metadata summaries instead of raw snippets.
+Avoid: Do not let observability databases become a second copy of private email, screen, file, shell, or clipboard content.
+See: jarvis/core/tracing.py
+
+## 2026-06-09 Cost Monitoring Without Router Drift
+
+Pattern: best-effort-cost-monitoring
+Fix: Record request-level model usage after `Router.route()` returns, using `RoutingResult` metadata and estimated token counts, while keeping provider loops and model routing unchanged.
+Avoid: Do not add cost monitoring by rewriting provider calls or changing fallback behavior; exact SDK token extraction can be layered on later.
+See: jarvis/core/costs.py
+## 2026-06-10 SDK Usage Extraction Without Double Counting
+
+Pattern: exact-sdk-usage-single-row
+Fix: Accumulate SDK token usage inside the successful router tier, carry it on `RoutingResult`, and let `Agent.chat()` write the single `model_usage` row for the request.
+Avoid: Do not write usage rows inside every provider loop unless the schema is explicitly changed to per-provider-call accounting; that would break the one-row-per-chat contract.
+See: jarvis/core/router.py
+## 2026-06-10 Failed Runs On Agent Runs
+
+Pattern: failed-run-rerun-state
+Fix: Store failed/success status and rerun parent links as additive columns on `agent_runs`, then expose list/detail/rerun helpers from `Agent` so reruns still use the normal chat path.
+Avoid: Do not create a parallel failure table that drifts from tracing, and do not let failure persistence errors mask the original provider/router error.
+See: jarvis/core/tracing.py
+## 2026-06-10 Thin CLI For Recovery Loops
+
+Pattern: failed-run-cli-thin-wrapper
+Fix: Put operator visibility in a small CLI/helper module that reuses tracing and Agent rerun methods, with fake agents in tests to avoid provider calls.
+Avoid: Do not build a new HTTP server or HUD panel until the repo has an existing surface for it; keep recovery commands additive and testable first.
+See: jarvis/tools/failed_runs.py
+
+## 2026-09-28 Confirmation Must Come From Raw User Input
+
+Pattern: user-confirmed-high-impact-actions
+Fix: Park high-impact tool calls in `confirmation.store` from `registry.dispatch`, and only execute them from `Agent.chat` when the user's next raw message matches the confirm regex; `dispatch(confirmed=True)` is a Python kwarg the model cannot reach. Env flags still apply on the confirmed run.
+Avoid: Do not let the model confirm via a tool parameter or via its own reply text, and do not keep pending actions alive across unrelated messages — a later "yes" could trigger them.
+See: jarvis/core/confirmation.py
+
+Pattern: fence-untrusted-tool-output
+Fix: Redact secrets and wrap web/email/file/screen/shell output in `<untrusted_tool_output>` tags (stripping nested tags) at the router boundary, and tell the model those contents are data.
+Avoid: Do not wrap inside `registry.dispatch`; callers inspect raw results (e.g. `startswith("Safety blocked")`).
+See: jarvis/core/router.py
+
+## 2026-09-28 Logs Are A Data Store
+
+Pattern: logs-are-personal-data
+Fix: Treat `logs/` like a database in the DPIA: redact every record via a logging filter, log conversation content only as `content_preview()` placeholders, rotate daily with retention, and use one shared file handler.
+Avoid: Do not add per-logger `FileHandler`s (breaks rotation) or log transcripts/replies with f-strings; redaction work in memory/traces is useless if logs keep raw copies.
+See: jarvis/core/logger.py, docs/privacy/DPIA.md
+
+## 2026-09-28 Startup Side Effects Need A Dry Run On Real Data
+
+Pattern: startup-side-effects
+Fix: Never call blocking work (TTS, network) on the Qt thread before `app.exec()` — the HUD cannot paint until the loop starts. Before shipping a retention default, count what the first startup would delete on the owner's real DB and say the number.
+Avoid: Do not rely on a one-line warning for destructive defaults; the 90-day default silently deleted all 130 existing conversations on the next launch.
+See: jarvis.py, jarvis/core/memory.py

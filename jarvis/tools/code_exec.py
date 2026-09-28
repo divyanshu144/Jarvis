@@ -7,6 +7,7 @@ import tempfile
 from pathlib import Path
 
 from jarvis.core.logger import get_logger
+from jarvis.core.tool_safety import scrubbed_env
 
 log = get_logger(__name__)
 
@@ -33,11 +34,15 @@ def execute(code: str, timeout: int | str = 30) -> str:
             f.write(code)
             tmp = f.name
 
+        # -I: isolated mode (ignores PYTHON* env vars and user site-packages);
+        # secrets are stripped from the env so model-written code cannot read API keys.
         result = subprocess.run(
-            ["python3", tmp],
+            ["python3", "-I", tmp],
             capture_output=True,
             text=True,
             timeout=timeout,
+            cwd=tempfile.gettempdir(),
+            env=scrubbed_env(),
         )
         Path(tmp).unlink(missing_ok=True)
 

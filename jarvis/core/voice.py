@@ -16,7 +16,7 @@ from pathlib import Path
 from typing import Callable
 
 from jarvis.core.config import cfg
-from jarvis.core.logger import get_logger
+from jarvis.core.logger import content_preview, get_logger
 
 log = get_logger(__name__)
 
@@ -191,14 +191,17 @@ class Transcriber:
             return None
         tmp = Path("/tmp/jarvis_audio.wav")
         tmp.write_bytes(audio_bytes)
-        with self._lock:
-            result = self._model.transcribe(
-                str(tmp),
-                language=cfg.whisper_language,
-                fp16=False,
-            )
+        try:
+            with self._lock:
+                result = self._model.transcribe(
+                    str(tmp),
+                    language=cfg.whisper_language,
+                    fp16=False,
+                )
+        finally:
+            tmp.unlink(missing_ok=True)  # voice recordings must not linger in /tmp
         text = result.get("text", "").strip()
-        log.info(f"Transcribed: {text!r}")
+        log.info(f"Transcribed: {content_preview(text)}")
         return text or None
 
     def transcribe_file(self, path: str) -> dict:

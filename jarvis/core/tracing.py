@@ -84,6 +84,9 @@ def _ensure_schema(conn: sqlite3.Connection) -> None:
             fallback_path   TEXT,
             final_answer    TEXT,
             error           TEXT,
+            error_category  TEXT,
+            status          TEXT NOT NULL DEFAULT 'running',
+            parent_request_id TEXT,
             latency_ms      REAL,
             created_at      REAL NOT NULL
         );
@@ -101,6 +104,13 @@ def _ensure_schema(conn: sqlite3.Connection) -> None:
         );
         """
     )
+    agent_columns = {row[1] for row in conn.execute("PRAGMA table_info(agent_runs)")}
+    if "status" not in agent_columns:
+        conn.execute("ALTER TABLE agent_runs ADD COLUMN status TEXT NOT NULL DEFAULT 'success'")
+    if "parent_request_id" not in agent_columns:
+        conn.execute("ALTER TABLE agent_runs ADD COLUMN parent_request_id TEXT")
+    if "error_category" not in agent_columns:
+        conn.execute("ALTER TABLE agent_runs ADD COLUMN error_category TEXT")
     conn.commit()
 
 
@@ -123,6 +133,11 @@ def _redact_text(text: str) -> str:
     text = _SECRET_ASSIGNMENT_RE.sub(lambda m: f"{m.group(1)}{m.group(2)}{_REDACTED}", text)
     text = _COOKIE_PAIR_RE.sub(lambda m: f"{m.group(1)}{m.group(2)}{_REDACTED}", text)
     return _SECRET_VALUE_RE.sub(_REDACTED, text)
+
+
+def redact_text(text: str) -> str:
+    """Public secret-redaction helper for text leaving the trace layer (memory, model context)."""
+    return _redact_text(text)
 
 
 def is_sensitive_tool(tool_name: str) -> bool:
@@ -194,15 +209,20 @@ def summarize_tool_result(tool_name: str, result: Any) -> str:
     return str(sanitize_value(str(result), limit=_MAX_RESULT))
 
 
-def start_agent_run(request_id: str, user_message: str, db_path: str | Path | None = None) -> None:
+def start_agent_run(
+    request_id: str,
+    user_message: str,
+    parent_request_id: str | None = None,
+    db_path: str | Path | None = None,
+) -> None:
     try:
         conn = _connect(db_path)
         conn.execute(
             """
             INSERT OR REPLACE INTO agent_runs(
                 request_id, user_message, tools_requested, tools_executed,
-                safety_blocks, created_at
-            ) VALUES(?,?,?,?,?,?)
+                safety_blocks, status, parent_request_id, created_at
+            ) VALUES(?,?,?,?,?,?,?,?)
             """,
             (
                 request_id,
@@ -210,6 +230,8 @@ def start_agent_run(request_id: str, user_message: str, db_path: str | Path | No
                 "[]",
                 "[]",
                 "[]",
+                "running",
+                sanitize_value(parent_request_id or "", limit=200),
                 time.time(),
             ),
         )
@@ -232,6 +254,8 @@ def finish_agent_run(
     fallback_path: str | None = None,
     final_answer: str | None = None,
     error: str | None = None,
+    error_category: str | None = None,
+    status: str | None = None,
     latency_ms: float | None = None,
     db_path: str | Path | None = None,
 ) -> None:
@@ -242,7 +266,8 @@ def finish_agent_run(
             UPDATE agent_runs
             SET route=?, intent=?, chosen_tier=?, chosen_model=?,
                 tools_requested=?, tools_executed=?, safety_blocks=?,
-                fallback_path=?, final_answer=?, error=?, latency_ms=?
+                fallback_path=?, final_answer=?, error=?, error_category=?,
+                status=?, latency_ms=?
             WHERE request_id=?
             """,
             (
@@ -256,6 +281,8 @@ def finish_agent_run(
                 sanitize_value(fallback_path or ""),
                 sanitize_value(final_answer or ""),
                 sanitize_value(error or ""),
+                sanitize_value(error_category or _error_category(error), limit=100),
+                sanitize_value(status or ("failed" if error else "success"), limit=50),
                 latency_ms,
                 request_id,
             ),
@@ -264,6 +291,75 @@ def finish_agent_run(
         conn.close()
     except Exception as exc:
         log.debug(f"Tracing finish_agent_run failed: {exc}")
+
+
+def _error_category(error: str | None) -> str:
+    if not error:
+        return ""
+    text = str(error).lower()
+    if "timeout" in text or "timed out" in text:
+        return "timeout"
+    if "auth" in text or "api key" in text or "unauthorized" in text or "401" in text:
+        return "auth"
+    if "connection" in text or "network" in text or "refused" in text:
+        return "network"
+    if "safety" in text or "blocked" in text:
+        return "safety"
+    return type(error).__name__ if not isinstance(error, str) else "runtime_error"
+
+
+def _agent_run_row(row: sqlite3.Row | None) -> dict[str, Any] | None:
+    if row is None:
+        return None
+    return {
+        "request_id": row["request_id"],
+        "user_message": row["user_message"] or "",
+        "route": row["route"] or "",
+        "intent": row["intent"] or "",
+        "chosen_tier": row["chosen_tier"],
+        "chosen_model": row["chosen_model"] or "",
+        "error": row["error"] or "",
+        "error_category": row["error_category"] or "",
+        "status": row["status"] or "",
+        "parent_request_id": row["parent_request_id"] or "",
+        "created_at": row["created_at"],
+        "latency_ms": row["latency_ms"],
+    }
+
+
+def list_failed_agent_runs(limit: int = 20, db_path: str | Path | None = None) -> list[dict[str, Any]]:
+    """Return recent failed agent runs for UI/backend recovery flows."""
+    try:
+        conn = _connect(db_path)
+        rows = conn.execute(
+            """
+            SELECT * FROM agent_runs
+            WHERE status = 'failed'
+            ORDER BY created_at DESC
+            LIMIT ?
+            """,
+            (max(1, min(int(limit or 20), 100)),),
+        ).fetchall()
+        conn.close()
+        return [_agent_run_row(row) for row in rows if row is not None]
+    except Exception as exc:
+        log.debug(f"Tracing list_failed_agent_runs failed: {exc}")
+        return []
+
+
+def get_agent_run_detail(request_id: str, db_path: str | Path | None = None) -> dict[str, Any] | None:
+    """Return one agent run detail by request id."""
+    try:
+        conn = _connect(db_path)
+        row = conn.execute(
+            "SELECT * FROM agent_runs WHERE request_id = ?",
+            (sanitize_value(request_id, limit=200),),
+        ).fetchone()
+        conn.close()
+        return _agent_run_row(row)
+    except Exception as exc:
+        log.debug(f"Tracing get_agent_run_detail failed: {exc}")
+        return None
 
 
 def record_tool_run(
@@ -328,7 +424,7 @@ def prune_traces(
     max_rows: int | None = None,
     db_path: str | Path | None = None,
 ) -> dict[str, int]:
-    """Manually prune old trace rows. Does nothing automatically."""
+    """Prune old trace rows. `jarvis.py` calls this at startup with `cfg.trace_retention_days`."""
     deleted = {"agent_runs": 0, "tool_runs": 0}
     try:
         conn = _connect(db_path)

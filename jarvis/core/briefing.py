@@ -10,7 +10,7 @@ import threading
 from typing import Callable
 
 from jarvis.core.config import cfg
-from jarvis.core.logger import get_logger
+from jarvis.core.logger import content_preview, get_logger
 
 log = get_logger(__name__)
 
@@ -54,7 +54,7 @@ class MorningBriefing:
         while self._is_busy():
             time.sleep(0.5)
         text = self._compose()
-        log.info(f"[Briefing] {text}")
+        log.info(f"[Briefing] {content_preview(text)}")
         self._speak(text)
 
     def _compose(self) -> str:

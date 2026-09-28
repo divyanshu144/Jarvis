@@ -34,6 +34,12 @@ Flag these before any push:
 - `graphify-out/`
 - screenshots or audio captures under `/tmp` or project directories
 
+## Privacy / DPIA Check
+
+- If the change adds or alters a tool, model/TTS/STT provider, external API, OAuth scope, stored table/file, retention default, env-flag default, or confirmation rule: update `docs/privacy/data_inventory.md` and the affected sections of `docs/privacy/DPIA.md` (risks, measures, actions) in the same change.
+- New persisted text must go through `redact_text`/`sanitize_value` and be covered by a retention window.
+- New logging of user or assistant content must use `content_preview()`.
+
 ## Drift Check
 
 - `requirements.txt` changed without verification or lock strategy.

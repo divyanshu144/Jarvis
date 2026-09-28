@@ -12,9 +12,10 @@ import math
 import struct
 import time
 import wave
+from pathlib import Path
 from typing import Callable
 
-from jarvis.core.logger import get_logger
+from jarvis.core.logger import content_preview, get_logger
 
 log = get_logger(__name__)
 
@@ -130,11 +131,15 @@ def _listen_whisper(
             with open(_TMP_PATH, "wb") as f:
                 f.write(buf.getvalue())
 
-            result = transcribe_fn(_TMP_PATH)
+            try:
+                result = transcribe_fn(_TMP_PATH)
+            finally:
+                # Ambient audio (incl. bystanders) must not linger on disk.
+                Path(_TMP_PATH).unlink(missing_ok=True)
             text = result.get("text", "").lower().strip()
 
             if "jarvis" in text and not is_busy():
-                log.info(f"Wake word detected (Whisper): {text!r}")
+                log.info(f"Wake word detected (Whisper): {content_preview(text)}")
                 on_detected()
 
         except Exception as e:

@@ -106,8 +106,9 @@ def test_agent_chat_generates_and_passes_request_id(monkeypatch):
 
     events = []
     monkeypatch.setattr(agent_module, "new_request_id", lambda: "req-agent")
-    monkeypatch.setattr(agent_module, "start_agent_run", lambda request_id, user_message: events.append(("start", request_id, user_message)))
+    monkeypatch.setattr(agent_module, "start_agent_run", lambda request_id, user_message, parent_request_id=None: events.append(("start", request_id, user_message, parent_request_id)))
     monkeypatch.setattr(agent_module, "finish_agent_run", lambda request_id, **kwargs: events.append(("finish", request_id, kwargs)))
+    monkeypatch.setattr(agent_module, "record_chat_usage", lambda request_id, **kwargs: events.append(("cost", request_id, kwargs)))
 
     class FakeLearner:
         def is_correction(self, text):
@@ -148,10 +149,17 @@ def test_agent_chat_generates_and_passes_request_id(monkeypatch):
     agent._last_response = ""
 
     assert agent.chat("hello") == "answer"
-    assert events[0] == ("start", "req-agent", "hello")
-    assert events[1][0] == "finish"
+    assert events[0] == ("start", "req-agent", "hello", None)
+    cost_events = [event for event in events if event[0] == "cost"]
+    assert len(cost_events) == 1
+    assert events[1][0] == "cost"
     assert events[1][1] == "req-agent"
-    assert events[1][2]["chosen_tier"] == 1
+    assert events[1][2]["tier"] == 1
+    assert events[1][2]["model"] == "model-x"
+    assert events[1][2]["usage_source"] == "missing_usage"
+    assert events[2][0] == "finish"
+    assert events[2][1] == "req-agent"
+    assert events[2][2]["chosen_tier"] == 1
 
 
 def test_dispatch_records_tool_run_when_request_id(monkeypatch):
@@ -280,3 +288,190 @@ def test_prune_traces_max_rows_keeps_newest(tmp_path):
     assert agents == ["agent-2"]
     assert tools == ["tool-2"]
 
+
+
+def test_failed_chat_persists_failed_run(monkeypatch, tmp_path):
+    from jarvis.core.agent import Agent
+    import jarvis.core.agent as agent_module
+
+    db = tmp_path / "trace.db"
+    monkeypatch.setattr(agent_module, "new_request_id", lambda: "req-failed")
+    monkeypatch.setattr(agent_module, "record_chat_usage", lambda *_, **__: None)
+    class FakeLearner:
+        def is_correction(self, text): return False
+        def corrections_context(self): return ""
+    class FakeShort:
+        def add(self, role, content): pass
+    class FakeMemory:
+        short = FakeShort()
+        def working_messages(self, n=10): return []
+        def recall_context(self, text): return ""
+        def build_system_prompt(self, base): return base
+    class FakeRouter:
+        def route(self, *_, **__): raise RuntimeError("password=hunter2 broke provider")
+    class FakeMetrics:
+        def log(self, result): pass
+
+    monkeypatch.setattr(agent_module, "start_agent_run", lambda request_id, user_message, parent_request_id=None: tracing.start_agent_run(request_id, user_message, parent_request_id=parent_request_id, db_path=db))
+    monkeypatch.setattr(agent_module, "finish_agent_run", lambda request_id, **kwargs: tracing.finish_agent_run(request_id, db_path=db, **kwargs))
+    monkeypatch.setattr(agent_module, "list_failed_agent_runs", lambda limit=20: tracing.list_failed_agent_runs(limit=limit, db_path=db))
+    monkeypatch.setattr(agent_module, "get_agent_run_detail", lambda request_id: tracing.get_agent_run_detail(request_id, db_path=db))
+
+    agent = Agent.__new__(Agent)
+    agent._learner = FakeLearner()
+    agent._memory = FakeMemory()
+    agent._router = FakeRouter()
+    agent._metrics = FakeMetrics()
+    agent._last_user_text = ""
+    agent._last_response = ""
+    agent._last_request_id = ""
+
+    try:
+        agent.chat("token=abc123 run this")
+    except RuntimeError:
+        pass
+
+    failed = agent.list_failed_runs()
+    assert len(failed) == 1
+    assert failed[0]["request_id"] == "req-failed"
+    assert failed[0]["status"] == "failed"
+    assert "abc123" not in failed[0]["user_message"]
+    assert "hunter2" not in failed[0]["error"]
+    assert "password=[REDACTED]" in failed[0]["error"]
+
+
+def test_successful_chat_records_success_status(monkeypatch, tmp_path):
+    from jarvis.core.agent import Agent
+    from jarvis.core.metrics import RoutingResult
+    import jarvis.core.agent as agent_module
+
+    db = tmp_path / "trace.db"
+    monkeypatch.setattr(agent_module, "new_request_id", lambda: "req-success")
+    monkeypatch.setattr(agent_module, "record_chat_usage", lambda *_, **__: None)
+    monkeypatch.setattr(agent_module, "start_agent_run", lambda request_id, user_message, parent_request_id=None: tracing.start_agent_run(request_id, user_message, parent_request_id=parent_request_id, db_path=db))
+    monkeypatch.setattr(agent_module, "finish_agent_run", lambda request_id, **kwargs: tracing.finish_agent_run(request_id, db_path=db, **kwargs))
+
+    class FakeLearner:
+        def is_correction(self, text): return False
+        def corrections_context(self): return ""
+    class FakeShort:
+        def add(self, role, content): pass
+    class FakeMemory:
+        short = FakeShort()
+        def working_messages(self, n=10): return []
+        def recall_context(self, text): return ""
+        def build_system_prompt(self, base): return base
+        def add_turn(self, user, assistant): pass
+    class FakeRouter:
+        def route(self, user_text, system, history=None, request_id=None):
+            return RoutingResult("ok", 1, [1], None, 1.0, user_text, chosen_model="qwen")
+    class FakeMetrics:
+        def log(self, result): pass
+
+    agent = Agent.__new__(Agent)
+    agent._learner = FakeLearner()
+    agent._memory = FakeMemory()
+    agent._router = FakeRouter()
+    agent._metrics = FakeMetrics()
+    agent._last_user_text = ""
+    agent._last_response = ""
+    agent._last_request_id = ""
+
+    assert agent.chat("hello") == "ok"
+    row = tracing.get_agent_run_detail("req-success", db_path=db)
+    assert row["status"] == "success"
+    assert row["error"] == ""
+
+
+def test_rerun_failed_run_creates_new_request_and_parent_link(monkeypatch, tmp_path):
+    from jarvis.core.agent import Agent
+    from jarvis.core.metrics import RoutingResult
+    import jarvis.core.agent as agent_module
+
+    db = tmp_path / "trace.db"
+    ids = iter(["req-original", "req-rerun"])
+    monkeypatch.setattr(agent_module, "new_request_id", lambda: next(ids))
+    monkeypatch.setattr(agent_module, "record_chat_usage", lambda *_, **__: None)
+    monkeypatch.setattr(agent_module, "start_agent_run", lambda request_id, user_message, parent_request_id=None: tracing.start_agent_run(request_id, user_message, parent_request_id=parent_request_id, db_path=db))
+    monkeypatch.setattr(agent_module, "finish_agent_run", lambda request_id, **kwargs: tracing.finish_agent_run(request_id, db_path=db, **kwargs))
+    monkeypatch.setattr(agent_module, "list_failed_agent_runs", lambda limit=20: tracing.list_failed_agent_runs(limit=limit, db_path=db))
+    monkeypatch.setattr(agent_module, "get_agent_run_detail", lambda request_id: tracing.get_agent_run_detail(request_id, db_path=db))
+
+    class FakeLearner:
+        def is_correction(self, text): return False
+        def corrections_context(self): return ""
+    class FakeShort:
+        def add(self, role, content): pass
+    class FakeMemory:
+        short = FakeShort()
+        def working_messages(self, n=10): return []
+        def recall_context(self, text): return ""
+        def build_system_prompt(self, base): return base
+        def add_turn(self, user, assistant): pass
+    class FakeRouter:
+        calls = 0
+        def route(self, user_text, system, history=None, request_id=None):
+            self.calls += 1
+            if self.calls == 1:
+                raise RuntimeError("provider down")
+            return RoutingResult("rerun ok", 1, [1], None, 1.0, user_text, chosen_model="qwen")
+    class FakeMetrics:
+        def log(self, result): pass
+
+    agent = Agent.__new__(Agent)
+    agent._learner = FakeLearner()
+    agent._memory = FakeMemory()
+    agent._router = FakeRouter()
+    agent._metrics = FakeMetrics()
+    agent._last_user_text = ""
+    agent._last_response = ""
+    agent._last_request_id = ""
+
+    try:
+        agent.chat("retry me")
+    except RuntimeError:
+        pass
+
+    rerun = agent.rerun_failed_run("req-original")
+    assert rerun["ok"] is True
+    assert rerun["request_id"] == "req-rerun"
+    assert rerun["parent_request_id"] == "req-original"
+    child = tracing.get_agent_run_detail("req-rerun", db_path=db)
+    assert child["status"] == "success"
+    assert child["parent_request_id"] == "req-original"
+
+
+def test_failure_persistence_failure_does_not_mask_original_error(monkeypatch):
+    from jarvis.core.agent import Agent
+    import jarvis.core.agent as agent_module
+
+    monkeypatch.setattr(agent_module, "new_request_id", lambda: "req-isolated")
+    monkeypatch.setattr(agent_module, "start_agent_run", lambda *_, **__: None)
+    monkeypatch.setattr(agent_module, "finish_agent_run", lambda *_, **__: (_ for _ in ()).throw(RuntimeError("trace failed")))
+
+    class FakeLearner:
+        def is_correction(self, text): return False
+        def corrections_context(self): return ""
+    class FakeMemory:
+        def working_messages(self, n=10): return []
+        def recall_context(self, text): return ""
+        def build_system_prompt(self, base): return base
+    class FakeRouter:
+        def route(self, *_, **__): raise ValueError("original failure")
+
+    agent = Agent.__new__(Agent)
+    agent._learner = FakeLearner()
+    agent._memory = FakeMemory()
+    agent._router = FakeRouter()
+    agent._metrics = object()
+    agent._last_user_text = ""
+    agent._last_response = ""
+    agent._last_request_id = ""
+
+    try:
+        agent.chat("hello")
+    except Exception as exc:
+        assert isinstance(exc, ValueError)
+        assert "original failure" in str(exc)
+    else:
+        assert False, "expected original failure"

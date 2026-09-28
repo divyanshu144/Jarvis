@@ -19,6 +19,7 @@ from typing import Any
 
 from jarvis.core.config import cfg
 from jarvis.core.logger import get_logger
+from jarvis.core.tracing import redact_text
 
 log = get_logger(__name__)
 
@@ -74,6 +75,10 @@ class LongTermMemory:
                 INSERT INTO conversations_fts(rowid, user_msg, assistant)
                 VALUES (new.rowid, new.user_msg, new.assistant);
             END;
+            CREATE TRIGGER IF NOT EXISTS conv_ad AFTER DELETE ON conversations BEGIN
+                INSERT INTO conversations_fts(conversations_fts, rowid, user_msg, assistant)
+                VALUES ('delete', old.rowid, old.user_msg, old.assistant);
+            END;
             CREATE TABLE IF NOT EXISTS user_profile (
                 key   TEXT PRIMARY KEY,
                 value TEXT NOT NULL
@@ -85,10 +90,23 @@ class LongTermMemory:
         turn_id = str(uuid.uuid4())
         self._conn.execute(
             "INSERT INTO conversations VALUES (?,?,?,?,?,?)",
-            (turn_id, time.time(), user_msg, assistant_msg, summary, None),
+            (turn_id, time.time(), redact_text(user_msg), redact_text(assistant_msg), redact_text(summary), None),
         )
         self._conn.commit()
         return turn_id
+
+    def prune_older_than(self, days: int) -> list[str]:
+        """Delete conversation turns older than `days`; returns the deleted turn ids."""
+        if days <= 0:
+            return []
+        cutoff = time.time() - days * 86400
+        ids = [r["id"] for r in self._conn.execute(
+            "SELECT id FROM conversations WHERE timestamp < ?", (cutoff,)
+        ).fetchall()]
+        if ids:
+            self._conn.execute("DELETE FROM conversations WHERE timestamp < ?", (cutoff,))
+            self._conn.commit()
+        return ids
 
     def keyword_recall(self, query: str, k: int = 3) -> list[str]:
         """Return up to k past turns whose text matches keywords in query."""
@@ -115,6 +133,30 @@ class LongTermMemory:
         except Exception as e:
             log.warning(f"keyword_recall failed: {e}")
             return []
+
+    # Derived tables in the same DB that hold query/response text (metrics, learning, validator).
+    _DERIVED_TABLES = {
+        "routing_metrics": "timestamp",
+        "validation_failures": "timestamp",
+        "corrections": "timestamp",
+        "tool_failures": "timestamp",
+        "routing_memory": "last_seen",
+    }
+
+    def prune_derived_tables(self, days: int) -> int:
+        """Apply the conversation retention window to derived text-bearing tables."""
+        if days <= 0:
+            return 0
+        cutoff = time.time() - days * 86400
+        deleted = 0
+        for table, column in self._DERIVED_TABLES.items():
+            try:
+                cur = self._conn.execute(f"DELETE FROM {table} WHERE {column} < ?", (cutoff,))
+                deleted += int(cur.rowcount or 0)
+            except sqlite3.OperationalError:
+                continue  # table not created yet
+        self._conn.commit()
+        return deleted
 
     def get_recent(self, n: int = 10) -> list[sqlite3.Row]:
         cur = self._conn.execute(
@@ -176,6 +218,14 @@ class SemanticMemory:
         except Exception as e:
             log.warning(f"SemanticMemory.add failed: {e}")
 
+    def delete(self, turn_ids: list[str]) -> None:
+        if not self._ready or not turn_ids:
+            return
+        try:
+            self._collection.delete(ids=list(turn_ids))
+        except Exception as e:
+            log.warning(f"SemanticMemory.delete failed: {e}")
+
     def query(self, text: str, k: int | None = None) -> list[str]:
         if not self._ready:
             return []
@@ -201,11 +251,26 @@ class Memory:
         self.short = ShortTermMemory(cfg.short_term_limit)
         self.long = LongTermMemory()
         self.semantic = SemanticMemory()
+        self.apply_retention()
 
     def add_turn(self, user_msg: str, assistant_msg: str) -> None:
-        """Save a completed turn to long-term + semantic memory."""
+        """Save a completed turn to long-term + semantic memory, with secrets redacted."""
         turn_id = self.long.save_turn(user_msg, assistant_msg)
-        self.semantic.add(turn_id, f"User: {user_msg}\nAssistant: {assistant_msg}")
+        self.semantic.add(turn_id, redact_text(f"User: {user_msg}\nAssistant: {assistant_msg}"))
+
+    def apply_retention(self, days: int | None = None) -> int:
+        """Delete episodic + semantic turns past the retention window. Profile facts are kept."""
+        days = cfg.memory_retention_days if days is None else days
+        try:
+            ids = self.long.prune_older_than(days)
+            self.semantic.delete(ids)
+            self.long.prune_derived_tables(days)
+            if ids:
+                log.info(f"Memory retention: removed {len(ids)} turns older than {days} days")
+            return len(ids)
+        except Exception as e:
+            log.warning(f"Memory retention failed: {e}")
+            return 0
 
     def recall_context(self, query: str) -> str:
         """
