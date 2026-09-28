@@ -8,6 +8,7 @@ import subprocess
 import urllib.parse
 
 from jarvis.core.logger import get_logger
+from jarvis.core.tool_safety import scrubbed_env
 
 log = get_logger(__name__)
 
@@ -70,12 +71,14 @@ def execute(command: str, cwd: str | None = None, timeout: int | str = 30) -> st
     try:
         result = subprocess.run(
             command,
+            # shell=True is the point of shell_exec; tool_safety gates it (env flag + denylist).
             shell=True,
             executable="/bin/zsh",
             capture_output=True,
             text=True,
             cwd=cwd or None,
             timeout=timeout,
+            env=scrubbed_env(),
         )
         output = ""
         if result.stdout:

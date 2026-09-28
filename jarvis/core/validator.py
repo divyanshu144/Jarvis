@@ -12,6 +12,7 @@ import time
 from typing import Any
 
 from jarvis.core.logger import get_logger
+from jarvis.core.tracing import redact_text, sanitize_value
 from jarvis.tools.registry import TOOL_DEFINITIONS
 
 log = get_logger(__name__)
@@ -111,10 +112,10 @@ def log_failure(
             (
                 time.time(),
                 tool_name,
-                json.dumps(raw_params),
+                json.dumps(sanitize_value(raw_params, limit=200)),
                 json.dumps(errors),
                 tier,
-                raw_response,
+                redact_text(raw_response or "")[:500],
             ),
         )
         conn.commit()

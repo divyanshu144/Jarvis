@@ -9,6 +9,7 @@ import base64
 import subprocess
 from pathlib import Path
 
+from jarvis.core import privacy
 from jarvis.core.config import cfg
 from jarvis.core.logger import get_logger
 
@@ -46,8 +47,11 @@ def execute(question: str = "") -> str:
             ["screencapture", "-x", str(_SHOT_PATH)],
             check=True, capture_output=True,
         )
-
-        img_data = base64.standard_b64encode(_SHOT_PATH.read_bytes()).decode()
+        privacy.notify_capture()
+        try:
+            img_data = base64.standard_b64encode(_SHOT_PATH.read_bytes()).decode()
+        finally:
+            _SHOT_PATH.unlink(missing_ok=True)  # the image is only needed for this one call
         prompt = question.strip() or "Describe what is currently visible on the screen. Be concise and specific."
 
         from anthropic import Anthropic

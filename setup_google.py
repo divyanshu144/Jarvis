@@ -31,7 +31,6 @@ def main() -> None:
         print("  3. Enable these APIs:")
         print("     • Gmail API")
         print("     • Google Calendar API")
-        print("     • People API (for Contacts)")
         print("  4. Go to APIs & Services → Credentials")
         print("  5. Create OAuth 2.0 Client ID → Desktop app")
         print("  6. Download the JSON file")
@@ -41,6 +40,19 @@ def main() -> None:
         sys.exit(0)
 
     print(f"✓ Found credentials at {CREDS_PATH}")
+
+    # Step 1b: Replace a token granted with the old, broader scopes.
+    from jarvis.tools._google_auth import SCOPES, revoke_and_remove_token, token_has_excess_scopes
+    if token_has_excess_scopes():
+        print("\nExisting Google token has broader permissions than JARVIS now needs.")
+        if revoke_and_remove_token():
+            print("✓ Old token revoked with Google and removed.")
+        else:
+            print("! Old token removed locally, but Google did not confirm revocation.")
+            print("  Remove access manually at https://myaccount.google.com/permissions")
+    print("\nJARVIS will request only:")
+    for scope in SCOPES:
+        print(f"  • {scope.rsplit('/', 1)[-1]}")
 
     # Step 2: Run OAuth flow
     print("\nStep 2: Authorising with Google (browser will open)...")
@@ -74,10 +86,9 @@ def main() -> None:
 
         # Test Calendar
         cal_service = get_service("calendar", "v3")
-        cal_list = cal_service.calendarList().list(maxResults=1).execute()
-        cals = cal_list.get("items", [])
-        cal_name = cals[0].get("summary", "primary") if cals else "primary"
-        print(f"✓ Calendar: connected ({cal_name})")
+        # calendar.events scope cannot read calendarList; probe the primary calendar's events.
+        cal_service.events().list(calendarId="primary", maxResults=1).execute()
+        print("✓ Calendar: connected (primary)")
 
     except Exception as e:
         print(f"Verification error: {e}")

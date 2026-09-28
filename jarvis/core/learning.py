@@ -16,6 +16,7 @@ import time
 from pathlib import Path
 
 from jarvis.core.logger import get_logger
+from jarvis.core.tracing import redact_text
 
 log = get_logger(__name__)
 
@@ -158,10 +159,10 @@ class LearningEngine:
         with self._lock:
             self._conn.execute(
                 "INSERT INTO corrections(bad_response,user_query,correction,timestamp) VALUES(?,?,?,?)",
-                (bad_response[:800], user_query[:400], correction[:800], time.time()),
+                (redact_text(bad_response)[:800], redact_text(user_query)[:400], redact_text(correction)[:800], time.time()),
             )
             self._conn.commit()
-        log.info(f"[Learning] Correction recorded: {correction[:80]}")
+        log.info(f"[Learning] Correction recorded ({len(correction)} chars)")
 
     def get_recent_corrections(self, limit: int = 3) -> list[dict]:
         """Return recent corrections to inject into the system prompt."""
@@ -190,7 +191,7 @@ class LearningEngine:
         with self._lock:
             self._conn.execute(
                 "INSERT INTO tool_failures(tool_name,query_context,failure_type,timestamp) VALUES(?,?,?,?)",
-                (tool_name, query_context[:400], failure_type, time.time()),
+                (tool_name, redact_text(query_context)[:400], failure_type, time.time()),
             )
             self._conn.commit()
 

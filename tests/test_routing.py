@@ -35,7 +35,7 @@ for _module_name, _class_name in (("openai", "OpenAI"), ("groq", "Groq"), ("anth
 
 # ── Helpers ────────────────────────────────────────────────────────────────────
 
-def _make_oai_response(text: str = "", tool_name: str = "", tool_args: dict | None = None):
+def _make_oai_response(text: str = "", tool_name: str = "", tool_args: dict | None = None, usage: dict | None = None):
     """Build a fake OpenAI-compatible chat completion response."""
     msg = MagicMock()
     if tool_name:
@@ -55,6 +55,7 @@ def _make_oai_response(text: str = "", tool_name: str = "", tool_args: dict | No
 
     resp = MagicMock()
     resp.choices = [choice]
+    resp.usage = usage
     return resp
 
 
@@ -157,9 +158,16 @@ class TestRouting:
         router = _router()
 
         # First call: model returns app_control tool call
-        tool_resp = _make_oai_response(tool_name="app_control", tool_args={"action": "open", "app_name": "Chrome"})
+        tool_resp = _make_oai_response(
+            tool_name="app_control",
+            tool_args={"action": "open", "app_name": "Chrome"},
+            usage={"prompt_tokens": 10, "completion_tokens": 2, "total_tokens": 12},
+        )
         # Second call: model returns text after tool result
-        text_resp = _make_oai_response(text="Chrome is now open.")
+        text_resp = _make_oai_response(
+            text="Chrome is now open.",
+            usage={"prompt_tokens": 5, "completion_tokens": 3, "total_tokens": 8},
+        )
 
         with patch("openai.OpenAI") as MockOAI:
             client = MagicMock()
@@ -172,6 +180,9 @@ class TestRouting:
         assert result.tiers_attempted == [1]
         assert result.escalation_reason is None
         assert "Chrome" in result.response
+        assert result.input_tokens == 15
+        assert result.output_tokens == 5
+        assert result.usage_source == "sdk_usage"
         mock_dispatch.assert_called_once_with("app_control", {"action": "open", "app_name": "Chrome"}, request_id=None)
 
     # Test 2: Vision keyword → routes directly to Tier 3

@@ -7,6 +7,11 @@ from jarvis.core.logger import get_logger
 
 log = get_logger(__name__)
 
+
+def _as_escape(value: str) -> str:
+    """Escape text for an AppleScript string literal (backslashes first, then quotes)."""
+    return str(value).replace("\\", "\\\\").replace('"', '\\"')
+
 DEFINITION = {
     "name": "apple_music",
     "description": (
@@ -88,7 +93,7 @@ def execute(
         if action == "search_play":
             if not query:
                 return "Error: query required for search_play."
-            safe = query.replace('"', '\\"')
+            safe = _as_escape(query)
             script = f"""
             tell application "Music"
                 activate

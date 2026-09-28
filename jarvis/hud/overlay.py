@@ -58,6 +58,8 @@ class HUDBridge(QObject):
     transcript_changed = pyqtSignal(str)
     response_changed   = pyqtSignal(str)
     tool_changed       = pyqtSignal(str)
+    privacy_changed    = pyqtSignal(str)   # rich-text privacy status strip
+    capture_happened   = pyqtSignal()      # screen was just captured
 
     def __init__(self) -> None:
         super().__init__()
@@ -688,6 +690,15 @@ class HUDOverlay(QWidget):
         self._history = HistoryView(self)
         self._history.setGeometry(116, 42, self._W - 128, 260)
 
+        # Privacy strip: mic / screen / cloud state, always visible (DPIA action A3)
+        self._privacy = QLabel(self)
+        self._privacy.setGeometry(116, 304, self._W - 128, 18)
+        self._privacy.setTextFormat(Qt.TextFormat.RichText)
+        self._privacy.setStyleSheet(
+            "QLabel { color: #6a8aaa; font-family: Menlo; font-size: 9px; background: transparent; }"
+        )
+        self._privacy_text = ""
+
         # Minimise button
         self._min_btn = QPushButton("—", self)
         self._min_btn.setFixedSize(28, 20)
@@ -763,6 +774,8 @@ class HUDOverlay(QWidget):
         self._bridge.transcript_changed.connect(self._on_transcript)
         self._bridge.response_changed.connect(self._on_response)
         self._bridge.tool_changed.connect(self._on_tool)
+        self._bridge.privacy_changed.connect(self._on_privacy)
+        self._bridge.capture_happened.connect(self._on_capture)
 
     def _setup_tray(self) -> None:
         try:
@@ -900,6 +913,17 @@ class HUDOverlay(QWidget):
     @pyqtSlot(str)
     def _on_tool(self, text: str) -> None:
         self._chrome.set_tool(text)
+
+    @pyqtSlot(str)
+    def _on_privacy(self, text: str) -> None:
+        self._privacy_text = text
+        self._privacy.setText(text)
+
+    @pyqtSlot()
+    def _on_capture(self) -> None:
+        # Show the capture for a few seconds, then restore the normal strip.
+        self._privacy.setText('<span style="color:#ff5a5a;">● SCREEN CAPTURED</span>')
+        QTimer.singleShot(4000, lambda: self._privacy.setText(self._privacy_text))
 
     # ── Mouse drag ────────────────────────────────────────────────────────────
 

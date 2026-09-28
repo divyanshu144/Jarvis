@@ -4,7 +4,8 @@ from __future__ import annotations
 
 from typing import Any, Callable
 
-from jarvis.core.tool_safety import check_tool_safety
+from jarvis.core import confirmation
+from jarvis.core.tool_safety import check_tool_safety, requires_confirmation
 from jarvis.core.tracing import record_safety_block, record_tool_run, summarize_tool_result
 from jarvis.tools import (
     apple_music,
@@ -75,8 +76,17 @@ _EXECUTORS: dict[str, Callable[..., str]] = {
 }
 
 
-def dispatch(tool_name: str, tool_input: dict[str, Any], request_id: str | None = None) -> str:
-    """Execute a tool by name with the given input dict. Always returns a string."""
+def dispatch(
+    tool_name: str,
+    tool_input: dict[str, Any],
+    request_id: str | None = None,
+    confirmed: bool = False,
+) -> str:
+    """Execute a tool by name with the given input dict. Always returns a string.
+
+    `confirmed` is only passed by `Agent.chat` after the user explicitly confirms
+    a parked action; model-driven calls from the router never set it.
+    """
     import time
 
     started = time.monotonic()
@@ -100,6 +110,19 @@ def dispatch(tool_name: str, tool_input: dict[str, Any], request_id: str | None 
         result = f"Safety blocked {tool_name}: {safety.reason}"
         if request_id:
             record_safety_block(request_id, tool_name, tool_input, safety.reason)
+        return result
+
+    if not confirmed and requires_confirmation(tool_name, tool_input):
+        result = confirmation.store.request(tool_name, tool_input, request_id=request_id)
+        if request_id:
+            record_tool_run(
+                request_id,
+                tool_name,
+                tool_input,
+                status="confirmation_required",
+                result_summary=result,
+                latency_ms=(time.monotonic() - started) * 1000,
+            )
         return result
 
     try:

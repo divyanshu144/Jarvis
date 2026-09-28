@@ -29,13 +29,16 @@ from PyQt6.QtCore import Qt
 from PyQt6.QtWidgets import QApplication
 from pynput import keyboard as _kb
 
+from jarvis.core import privacy
 from jarvis.core.agent import Agent
 from jarvis.core.briefing import MorningBriefing
 from jarvis.core.config import cfg
 from jarvis.core.fde_tracker import FDETracker
-from jarvis.core.logger import get_logger
+from jarvis.core.logger import content_preview, get_logger
 from jarvis.core.memory import Memory
 from jarvis.core.proactive import ProactiveMonitor
+from jarvis.core.tool_safety import check_tool_safety
+from jarvis.core.tracing import prune_traces
 from jarvis.core.tts import speak
 from jarvis.core.voice import Transcriber, VoiceRecorder
 from jarvis.hud.overlay import HUDBridge, HUDOverlay, Status
@@ -43,12 +46,44 @@ from jarvis.wake_word.stub import listen_for_wake_word
 
 log = get_logger("jarvis")
 
+_PRIVACY_NOTICE_VERSION = "v1"
+
+
+def privacy_status_html() -> str:
+    """One-line HUD strip: what is listening, capturing, and leaving the Mac."""
+    on, off = "#ff8a5a", "#4a6a8a"
+    mic = ("MIC wake word ON", on) if cfg.wake_word_enabled else ("MIC hotkey only", off)
+    screen_ok = check_tool_safety("screenshot", {}).allowed
+    screen = ("SCREEN capture allowed", on) if screen_ok else ("SCREEN off", off)
+    cloud = ("CLOUD local-only", off) if cfg.privacy_local_only else ("CLOUD Groq/Anthropic on", on)
+    return " · ".join(f'<span style="color:{c};">● {t}</span>' for t, c in (mic, screen, cloud))
+
+
+def privacy_notice() -> str:
+    cloud = (
+        "Local-only mode is on, so email, calendar, screen and file content stays on this Mac."
+        if cfg.privacy_local_only
+        else "Requests the local model cannot handle go to Groq or Anthropic, and replies may be voiced by ElevenLabs."
+    )
+    def _keep(days: int) -> str:
+        return f"{days} days" if days > 0 else "until you delete them"
+
+    return (
+        "Privacy notice. Your voice is transcribed on this Mac. "
+        f"{cloud} Conversations are kept {_keep(cfg.memory_retention_days)}, "
+        f"traces {_keep(cfg.trace_retention_days)} and logs {_keep(cfg.log_retention_days)}. "
+        "Sending, deleting, messaging and running commands always need your confirmation. "
+        "Say export my data or forget everything at any time."
+    )
+
 
 class JarvisApp:
     """Top-level orchestrator: voice loop + HUD + agent."""
 
     def __init__(self) -> None:
         self._memory = Memory()
+        if cfg.trace_retention_days > 0:
+            prune_traces(days_to_keep=cfg.trace_retention_days)
         self._bridge = HUDBridge()
         self._recorder = VoiceRecorder()
         self._transcriber = Transcriber()
@@ -69,6 +104,17 @@ class JarvisApp:
         # First-run: ask for user name
         if not self._memory.long.get_profile("name") and not cfg.user_name:
             self._first_run_setup()
+
+    def _privacy_notice_due(self) -> bool:
+        """True once per notice version; records that the notice was shown."""
+        marker = cfg.db_path.parent / f".privacy_notice_{_PRIVACY_NOTICE_VERSION}"
+        if marker.exists():
+            return False
+        try:
+            marker.write_text(time.strftime("%Y-%m-%dT%H:%M:%S"))
+        except OSError as e:
+            log.warning(f"Could not record privacy notice: {e}")
+        return True
 
     def _first_run_setup(self) -> None:
         name = input("Welcome! What's your name? ").strip()
@@ -149,7 +195,7 @@ class JarvisApp:
                 return
 
             self._set_transcript(text)
-            log.info(f"User: {text}")
+            log.info(f"User: {content_preview(text)}")
 
             # 3. Think + execute tools
             self._set_status(Status.THINKING)
@@ -157,7 +203,7 @@ class JarvisApp:
 
             # 4. Display + speak
             self._set_response(response)
-            log.info(f"JARVIS: {response}")
+            log.info(f"JARVIS: {content_preview(response)}")
             self._set_status(Status.SPEAKING)
             speak(response)
 
@@ -184,7 +230,7 @@ class JarvisApp:
             self._set_status(Status.THINKING)
             response = self._agent.chat(text)
             self._set_response(response)
-            log.info(f"JARVIS (text): {response}")
+            log.info(f"JARVIS (text): {content_preview(response)}")
             self._set_status(Status.SPEAKING)
             speak(response)
         except Exception as e:
@@ -217,6 +263,13 @@ class JarvisApp:
         )
         self._hud.show()
 
+        # Privacy indicators: status strip + flash on every real screen capture.
+        privacy.add_capture_listener(self._bridge.capture_happened.emit)
+        self._bridge.privacy_changed.emit(privacy_status_html())
+        first_notice = self._privacy_notice_due()
+        if first_notice:
+            self._set_response(privacy_notice())
+
         self._start_global_hotkey()
 
         # Warm up Tier 1 so first voice command has no cold-start delay
@@ -224,12 +277,15 @@ class JarvisApp:
 
         self._start_fde_refresh_loop()
 
-        # Start wake word listener ("Hey Jarvis")
-        threading.Thread(
-            target=listen_for_wake_word,
-            args=(self.trigger, self._transcriber.transcribe_file, lambda: self._voice_lock.locked()),
-            daemon=True,
-        ).start()
+        # Start wake word listener ("Hey Jarvis") unless the always-on mic is disabled.
+        if cfg.wake_word_enabled:
+            threading.Thread(
+                target=listen_for_wake_word,
+                args=(self.trigger, self._transcriber.transcribe_file, lambda: self._voice_lock.locked()),
+                daemon=True,
+            ).start()
+        else:
+            log.info("Wake word disabled (voice.wake_word: false); use the hotkey or type.")
 
         # Start proactive monitor (meeting alerts, battery, email notifications)
         ProactiveMonitor(
@@ -244,8 +300,17 @@ class JarvisApp:
         )
         self._briefing.check_startup()
 
+        # The first-run privacy notice is shown in the HUD only; just the greeting is spoken.
         log.info("JARVIS is online. Say 'Hey Jarvis' or press Cmd+Shift+J to trigger.")
-        speak(f"JARVIS online. How can I help you{', ' + cfg.user_name if cfg.user_name else ''}?")
+        greeting = f"JARVIS online. How can I help you{', ' + cfg.user_name if cfg.user_name else ''}?"
+
+        def _greet() -> None:
+            # speak() blocks, so it must not run on the Qt thread: the HUD only paints once
+            # app.exec() starts. Holding the voice lock stops the wake word hearing JARVIS.
+            with self._voice_lock:
+                speak(greeting)
+
+        threading.Thread(target=_greet, daemon=True).start()
 
         sys.exit(app.exec())
 
